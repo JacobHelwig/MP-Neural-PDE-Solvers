@@ -147,7 +147,7 @@ def test_unrolled_losses(model: torch.nn.Module,
         losses_base_tmp = []
         with torch.no_grad():
             same_steps = [graph_creator.tw * nr_gt_steps] * batch_size
-            data, labels = graph_creator.create_data(u_super, same_steps)
+            data, labels = graph_creator.create_data(u_super, same_steps) # u_super[:, 50:75] - labels, u_super[:, 25:50] - data
             if f'{model}' == 'GNN':
                 graph = graph_creator.create_graph(data, labels, x, variables, same_steps).to(device)
                 pred = model(graph)
@@ -157,21 +157,37 @@ def test_unrolled_losses(model: torch.nn.Module,
                 pred = model(data)
                 loss = criterion(pred, labels) / nx_base_resolution
 
-            losses_tmp.append(loss / batch_size)
+            losses_tmp.append(loss / batch_size) # ((pred - graph.y)**2).mean() * graph_creator.tw == loss / batch_size
+
+            # create storage for the predicted trajectory and store the first prediction
+            pred_traj = torch.zeros_like(u_super)
+            pred_traj[:, (nr_gt_steps * graph_creator.tw):((nr_gt_steps + 1) * graph_creator.tw)] = pred.reshape((batch_size, nx_base_resolution, -1)).permute((0, 2, 1))
+            # (((pred.reshape((batch_size, nx_base_resolution, -1)).permute((0, 2, 1)) - labels.cuda())**2).mean((0, 2)).sum() - loss / batch_size) + (((pred.reshape((batch_size, nx_base_resolution, -1)).permute((0, 2, 1)) - u_super[:, 50:75].cuda())**2).mean((0, 2)).sum() - loss / batch_size)
+            # (((pred_traj - u_super)**2)).mean((0, 2))[50:75].sum()
 
             # Unroll trajectory and add losses which are obtained for each unrolling
             for step in range(graph_creator.tw * (nr_gt_steps + 1), graph_creator.t_res - graph_creator.tw + 1, graph_creator.tw):
                 same_steps = [step] * batch_size
                 _, labels = graph_creator.create_data(u_super, same_steps)
                 if f'{model}' == 'GNN':
-                    graph = graph_creator.create_next_graph(graph, pred, labels, same_steps).to(device)
-                    pred = model(graph)
-                    loss = criterion(pred, graph.y) / nx_base_resolution
+                    graph = graph_creator.create_next_graph(graph, pred, labels, same_steps).to(device) # criterion(graph.y[:graph_creator.x_res].cpu(), labels[0].t().cpu()) == 0
+                    pred = model(graph) # predict one timestep into the future
+                    loss = criterion(pred, graph.y) / nx_base_resolution # sum of the squared errors in each of the batches divided by number of spatial locations
+                    # loss is: ((pred.reshape((batch_size, nx_base_resolution, -1)).permute((0, 2, 1)) - labels.cuda())**2).mean(-1).sum()
                 else:
                     labels = labels.to(device)
                     pred = model(pred)
                     loss = criterion(pred, labels) / nx_base_resolution
-                losses_tmp.append(loss / batch_size)
+
+
+                # add current prediction to the predicted trajectory
+                pred_traj[:, step:(step + graph_creator.tw)] = pred.reshape((batch_size, nx_base_resolution, -1)).permute((0, 2, 1))
+
+                losses_tmp.append(loss / batch_size) #  the thing added to the list is: ((pred.reshape((batch_size, nx_base_resolution, -1)).permute((0, 2, 1)) - labels.cuda())**2).mean((0, 2)).sum()
+
+            # get sum of squared errors between the predicted trajectory and u_super averaged over space
+            loss_test = ((pred_traj - u_super)**2).mean((0, 2))[(nr_gt_steps * graph_creator.tw):].sum()
+            # same as: ((pred_traj - u_super)[:, (nr_gt_steps * graph_creator.tw):]**2).mean() * (graph_creator.t_res - nr_gt_steps * graph_creator.tw)
 
             # Losses for numerical baseline
             for step in range(graph_creator.tw * nr_gt_steps, graph_creator.t_res - graph_creator.tw + 1,

@@ -6,6 +6,7 @@ from torch_geometric.data import Data
 from equations.PDEs import *
 from torch_geometric.nn import MessagePassing, global_mean_pool, InstanceNorm, avg_pool_x, BatchNorm
 
+from experiments.nonLocal import NonLocalBlock as NonLocalBlock
 class Swish(nn.Module):
     """
     Swish activation function
@@ -27,7 +28,10 @@ class GNN_Layer(MessagePassing):
                  out_features: int,
                  hidden_features: int,
                  time_window: int,
-                 n_variables: int):
+                 n_variables: int,
+                 non_local: bool = False,
+                 mode: str = 'embedded',
+                 nx: int = -1):
         """
         Initialize message passing layers
         Args:
@@ -56,12 +60,39 @@ class GNN_Layer(MessagePassing):
                                           )
         self.norm = InstanceNorm(hidden_features)
 
+        self.nx = nx
+
+        self.non_local = NonLocalBlock(conv=nn.Conv1d,
+                                       filters_in=hidden_features,
+                                       filters=hidden_features // 2,
+                                       height=nx, # 1 is the spatial dim
+                                       stride=1,
+                                       mode=mode,
+                                       act='relu',
+                                       norm='layer') if non_local else False
+
     def forward(self, x, u, pos, variables, edge_index, batch):
         """
         Propagate messages along edges
         """
         x = self.propagate(edge_index, x=x, u=u, pos=pos, variables=variables)
         x = self.norm(x, batch)
+        if self.non_local:
+
+            # get number of batches
+            n_batch = len(batch.unique())
+
+            # divide x up into batches: x.shape = [batch_size, nx, hidden_dim]
+            x = x.view(n_batch, self.nx, -1)
+
+            # reshape x to [batch_size, hidden_dim, nx]
+            x = x.permute((0, 2, 1))
+            x = self.non_local(x)
+
+            # return x to its original dimensions and shape
+            x = x.permute((0, 2, 1))
+            x = x.reshape(n_batch * self.nx, -1)
+
         return x
 
     def message(self, x_i, x_j, u_i, u_j, pos_i, pos_j, variables_i):
@@ -93,7 +124,9 @@ class MP_PDE_Solver(torch.nn.Module):
                  time_window: int = 25,
                  hidden_features: int = 128,
                  hidden_layer: int = 6,
-                 eq_variables: dict = {}
+                 eq_variables: dict = {},
+                 non_local_locations: list = [],
+                 mode: str = 'embedded'
     ):
         """
         Initialize MP-PDE solver class.
@@ -117,12 +150,18 @@ class MP_PDE_Solver(torch.nn.Module):
         self.time_window = time_window
         self.eq_variables = eq_variables
 
+        # get spatial resolution
+        nx = pde.grid_size[1]
+
         self.gnn_layers = torch.nn.ModuleList(modules=(GNN_Layer(
             in_features=self.hidden_features,
             hidden_features=self.hidden_features,
             out_features=self.hidden_features,
             time_window=self.time_window,
-            n_variables=len(self.eq_variables) + 1  # variables = eq_variables + time
+            n_variables=len(self.eq_variables) + 1,  # variables = eq_variables + time
+            non_local=(_ in non_local_locations),
+            mode=mode,
+            nx=nx
         ) for _ in range(self.hidden_layer - 1)))
 
         # The last message passing last layer has a fixed output size to make the use of the decoder 1D-CNN easier
@@ -131,7 +170,7 @@ class MP_PDE_Solver(torch.nn.Module):
                                          out_features=self.hidden_features,
                                          time_window=self.time_window,
                                          n_variables=len(self.eq_variables) + 1
-                                        )
+                                         )
                                )
 
         self.embedding_mlp = nn.Sequential(

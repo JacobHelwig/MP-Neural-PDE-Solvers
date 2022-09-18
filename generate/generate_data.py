@@ -13,7 +13,7 @@ from typing import Callable, Tuple
 from datetime import datetime
 from equations.PDEs import PDE, CE, WE
 from temporal.solvers import *
-
+from tqdm import tqdm
 
 def check_files(pde: dict, modes: dict, experiment: str) -> None:
     """
@@ -312,7 +312,7 @@ def generate_data_combined_equation(experiment: str,
     h5f_beta['gamma'] = dataset.create_dataset('gamma', (num_samples, ), dtype=float)
 
     # torch.random.manual_seed(2)
-    for idx in range(num_batches):
+    for idx in tqdm(range(num_batches)):
 
         A, omega, phi, l = params(pde[list(pde.keys())[0]], batch_size, device=device)
 
@@ -430,6 +430,7 @@ def combined_equation(experiment: str,
     check_files(pde, files, experiment=experiment)
 
     for mode, _, num_samples in files:
+        print(f"Generating {mode}...")
         generate_data_combined_equation(experiment=experiment,
                                         pde=pde,
                                         mode=mode,

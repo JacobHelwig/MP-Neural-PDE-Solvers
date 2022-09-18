@@ -16,13 +16,14 @@ from experiments.models_gnn import MP_PDE_Solver
 from experiments.models_cnn import BaseCNN
 from experiments.train_helper import *
 from equations.PDEs import *
+from tqdm import tqdm
 
 def check_directory() -> None:
     """
     Check if log directory exists within experiments
     """
     if not os.path.exists(f'experiments/log'):
-        os.mkdir(f'experiments/log')
+        os.makedirs(f'experiments/log')
     if not os.path.exists(f'models'):
         os.mkdir(f'models')
 
@@ -62,7 +63,7 @@ def train(args: argparse,
     # Loop over every epoch as often as the number of timesteps in one trajectory.
     # Since the starting point is randomly drawn, this in expectation has every possible starting point/sample combination of the training data.
     # Therefore in expectation the whole available training information is covered.
-    for i in range(graph_creator.t_res):
+    for i in tqdm(range(graph_creator.t_res)):
         losses = training_loop(model, unrolling, args.batch_size, optimizer, loader, graph_creator, criterion, device)
         if(i % args.print_interval == 0):
             print(f'Training Loss (progress: {i / graph_creator.t_res:.2f}): {torch.mean(losses)}')
@@ -119,6 +120,11 @@ def test(args: argparse,
 
 def main(args: argparse):
 
+    if args.debug:
+        os.chdir("..")
+
+    non_local_locations = args.non_local_locations if args.non_local_locations else []
+
     device = args.device
     check_directory()
 
@@ -140,27 +146,27 @@ def main(args: argparse):
         raise Exception("Wrong experiment")
 
     # Load datasets
-    train_string = f'data/{pde}_train_{args.experiment}.h5'
-    valid_string = f'data/{pde}_valid_{args.experiment}.h5'
-    test_string = f'data/{pde}_test_{args.experiment}.h5'
+    train_string = f'{args.data_path}/{pde}_train_{args.experiment}.h5'
+    valid_string = f'{args.data_path}/{pde}_valid_{args.experiment}.h5'
+    test_string = f'{args.data_path}/{pde}_test_{args.experiment}.h5'
     try:
         train_dataset = HDF5Dataset(train_string, pde=pde, mode='train', base_resolution=base_resolution, super_resolution=super_resolution)
         train_loader = DataLoader(train_dataset,
                                   batch_size=args.batch_size,
-                                  shuffle=True,
-                                  num_workers=4)
+                                  shuffle=(not args.debug),
+                                  num_workers=(0 if args.debug else 4))
 
         valid_dataset = HDF5Dataset(valid_string, pde=pde, mode='valid', base_resolution=base_resolution, super_resolution=super_resolution)
         valid_loader = DataLoader(valid_dataset,
                                   batch_size=args.batch_size,
                                   shuffle=False,
-                                  num_workers=4)
+                                  num_workers=(0 if args.debug else 4))
 
         test_dataset = HDF5Dataset(test_string, pde=pde, mode='test', base_resolution=base_resolution, super_resolution=super_resolution)
         test_loader = DataLoader(test_dataset,
                                  batch_size=args.batch_size,
                                  shuffle=False,
-                                 num_workers=4)
+                                 num_workers=(0 if args.debug else 4))
     except:
         raise Exception("Datasets could not be loaded properly")
 
@@ -173,11 +179,13 @@ def main(args: argparse):
     timestring = f'{dateTimeObj.date().month}{dateTimeObj.date().day}{dateTimeObj.time().hour}{dateTimeObj.time().minute}'
 
     if(args.log):
-        logfile = f'experiments/log/{args.model}_{pde}_{args.experiment}_xresolution{args.base_resolution[1]}-{args.super_resolution[1]}_n{args.neighbors}_tw{args.time_window}_unrolling{args.unrolling}_time{timestring}.csv'
+        logfile = f'experiments/log/{args.model}_{pde}_{args.experiment}_xresolution{args.base_resolution[1]}-{args.super_resolution[1]}_n{args.neighbors}_tw{args.time_window}_unrolling{args.unrolling}{"_" + args.suffix if args.suffix else ""}_time{timestring}.csv'
         print(f'Writing to log file {logfile}')
         sys.stdout = open(logfile, 'w')
 
-    save_path = f'models/GNN_{pde}_{args.experiment}_xresolution{args.base_resolution[1]}-{args.super_resolution[1]}_n{args.neighbors}_tw{args.time_window}_unrolling{args.unrolling}_time{timestring}.pt'
+    print(f"Args: {args}")
+
+    save_path = f'models/GNN_{pde}_{args.experiment}_xresolution{args.base_resolution[1]}-{args.super_resolution[1]}_n{args.neighbors}_tw{args.time_window}_unrolling{args.unrolling}{"_" + args.suffix if args.suffix else ""}_time{timestring}.pt'
     print(f'Training on dataset {train_string}')
     print(device)
     print(save_path)
@@ -207,10 +215,14 @@ def main(args: argparse):
     if args.model == 'GNN':
         model = MP_PDE_Solver(pde=pde,
                               time_window=graph_creator.tw,
-                              eq_variables=eq_variables).to(device)
+                              eq_variables=eq_variables,
+                              non_local_locations=non_local_locations,
+                              mode=args.mode).to(device)
     elif args.model == 'BaseCNN':
         model = BaseCNN(pde=pde,
                         time_window=args.time_window).to(device)
+    elif args.model == 'FNO1d':
+
     else:
         raise Exception("Wrong model specified")
 
@@ -227,7 +239,7 @@ def main(args: argparse):
     test_loss = 10e30
     criterion = torch.nn.MSELoss(reduction="sum")
     for epoch in range(args.num_epochs):
-        print(f"Epoch {epoch}")
+        print(f"Epoch {epoch}, {datetime.now()}")
         train(args, pde, epoch, model, optimizer, train_loader, graph_creator, criterion, device=device)
         print("Evaluation on validation dataset:")
         val_loss = test(args, pde, model, valid_loader, graph_creator, criterion, device=device)
@@ -269,6 +281,11 @@ if __name__ == "__main__":
     parser.add_argument('--parameter_ablation', type=eval, default=False,
                         help='Flag for ablating MP-PDE solver without equation specific parameters')
 
+    parser.add_argument('--non_local_locations', type=int, default=None, nargs="*",
+                        help='After which of the message passing steps should the non-local block be added?')
+    parser.add_argument('--mode', type=str, default='embedded',
+                        help='Pairwise function to use for non-local blocks')
+
     # Base resolution and super resolution
     parser.add_argument('--base_resolution', type=lambda s: [int(item) for item in s.split(',')],
             default=[250, 100], help="PDE base resolution on which network is applied")
@@ -288,6 +305,11 @@ if __name__ == "__main__":
             help='Interval between print statements')
     parser.add_argument('--log', type=eval, default=False,
             help='pip the output to log file')
+    parser.add_argument('--debug', type=eval, default=False,
+                        help='Should we debug?')
+    parser.add_argument('--suffix', type=str, default=None,
+                        help='Suffix to add to the end of the log and saved model file names')
+    parser.add_argument('--data_path', type=str, default='data')
 
     args = parser.parse_args()
     main(args)

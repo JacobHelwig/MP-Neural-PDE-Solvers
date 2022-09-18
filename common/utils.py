@@ -10,7 +10,6 @@ from torch_geometric.data import Data
 from torch_cluster import radius_graph, knn_graph
 from equations.PDEs import *
 
-
 class HDF5Dataset(Dataset):
     """Load samples of an PDE Dataset, get items according to PDE"""
 
@@ -158,13 +157,13 @@ class GraphCreator(nn.Module):
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: input data and label
         """
-        data = torch.Tensor()
-        labels = torch.Tensor()
-        for (dp, step) in zip(datapoints, steps):
-            d = dp[step - self.tw:step]
-            l = dp[step:self.tw + step]
-            data = torch.cat((data, d[None, :]), 0)
-            labels = torch.cat((labels, l[None, :]), 0)
+        data = torch.Tensor() # storage for the input; it will be of shape (batch, tw, nx)
+        labels = torch.Tensor() # storage for target; it will be of shape (batch, tw, nx)
+        for (dp, step) in zip(datapoints, steps): # iterate over the batches; datapoints is (batch, nt, nx)
+            d = dp[step - self.tw:step] # dp is (nt, nx); get the tw solutions prior to step; dp[(step - self.tw):step] - dp[step - self.tw:step] == 0
+            l = dp[step:self.tw + step] # get the tw solutions after step
+            data = torch.cat((data, d[None, :]), 0) # store input for the batch
+            labels = torch.cat((labels, l[None, :]), 0) # store target for the batch
 
         return data, labels
 
@@ -255,17 +254,27 @@ class GraphCreator(nn.Module):
             Data: Pytorch Geometric data graph
         """
         # Output is the new input
-        graph.x = torch.cat((graph.x, pred), 1)[:, self.tw:]
+        graph.x = torch.cat((graph.x, pred), 1)[:, self.tw:] # graph.x becomes pred
         nt = self.pde.grid_size[0]
         nx = self.pde.grid_size[1]
         t = torch.linspace(self.pde.tmin, self.pde.tmax, nt)
         # Update labels and input timesteps
         y, t_pos = torch.Tensor(), torch.Tensor()
         for (labels_batch, step) in zip(labels, steps):
-            y = torch.cat((y, torch.transpose(torch.cat([l[None, :] for l in labels_batch]), 0, 1)), )
-            t_pos = torch.cat((t_pos, torch.ones(nx) * t[step]), )
-        graph.y = y
+            y = torch.cat((y, torch.transpose(torch.cat([l[None, :] for l in labels_batch]), 0, 1)), ) # get labels for the batch; same as torch.cat((y, torch.transpose(labels[0], 0, 1)), )
+            t_pos = torch.cat((t_pos, torch.ones(nx) * t[step]), ) # get time for the batch
+        graph.y = y # store labels and time
         graph.pos[:, 0] = t_pos
 
         return graph
 
+# testing
+# pde = "CE"
+# experiment = "E1"
+# path = "/mnt/data/shared/jacob/mppde"
+# train_string = f'{path}/data/{pde}_train_{experiment}.h5'
+# base_resolution = [250, 40]
+# super_resolution = [250, 200]
+# train_dataset = HDF5Dataset(train_string, pde=pde, mode='train', base_resolution=base_resolution, super_resolution=super_resolution)
+# train_dataset[0]
+# train_dataset[len(train_dataset) - 1]
